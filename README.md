@@ -122,19 +122,5 @@ thread; "Stop run" cancels cooperatively at the next iteration boundary.
   for a batch `(n, dimension)` array.
 - New callback: subclass `optimzoo.core.BaseCallback` and override any of
   `on_start`, `on_iteration`, `on_improvement`, `on_convergence`, `on_finish`, `on_stop`.
-
-## Tests
-
-```bash
-pytest
-```
-
-## Scope note
-
-This is a focused, working core (algorithms + benchmarks + visualization +
-CLI + a live dashboard for 2D problems), not the full GPU/distributed/plugin-
-marketplace vision of a "batteries-included" optimization platform. The
-architecture is intentionally extensible so those pieces can be layered on
-later without breaking the API.
 ---
 Made with ❤️ from NiceGuy

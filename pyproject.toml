@@ -1,0 +1,31 @@
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "optimzoo"
+version = "0.1.0"
+description = "A comprehensive optimization and evolutionary computation library with rich visualization."
+readme = "README.md"
+requires-python = ">=3.10"
+license = { text = "MIT" }
+dependencies = [
+    "numpy>=1.24",
+    "scipy>=1.10",
+    "matplotlib>=3.7",
+]
+
+[project.optional-dependencies]
+rich = ["rich>=13.0"]
+plotly = ["plotly>=5.18"]
+dashboard = ["fastapi>=0.110", "uvicorn[standard]>=0.29", "websockets>=12.0", "pydantic>=2.0"]
+dev = ["pytest>=7.4", "pytest-cov>=4.1"]
+
+[project.scripts]
+optimzoo = "optimzoo.cli.main:main"
+
+[tool.setuptools.packages.find]
+include = ["optimzoo*"]
+
+[tool.setuptools.package-data]
+"optimzoo.dashboard" = ["static/*"]

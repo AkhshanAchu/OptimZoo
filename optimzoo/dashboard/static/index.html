@@ -1,0 +1,280 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>OptimZoo Dashboard</title>
+<style>
+  :root {
+    color-scheme: light;
+    --surface-1:      #fcfcfb;
+    --page:           #f9f9f7;
+    --text-primary:   #0b0b0b;
+    --text-secondary: #52514e;
+    --text-muted:     #898781;
+    --gridline:       #e1e0d9;
+    --baseline:       #c3c2b7;
+    --border:         rgba(11,11,11,0.10);
+    --series-best:    #2a78d6;
+    --series-mean:    #eb6834;
+    --series-worst:   #e34948;
+    --status-good:    #0ca30c;
+    --status-critical:#d03b3b;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root:where(:not([data-theme="light"])) {
+      color-scheme: dark;
+      --surface-1:      #1a1a19;
+      --page:           #0d0d0d;
+      --text-primary:   #ffffff;
+      --text-secondary: #c3c2b7;
+      --text-muted:     #898781;
+      --gridline:       #2c2c2a;
+      --baseline:       #383835;
+      --border:         rgba(255,255,255,0.10);
+      --series-best:    #3987e5;
+      --series-mean:    #d95926;
+      --series-worst:   #e66767;
+      --status-good:    #0ca30c;
+      --status-critical:#d03b3b;
+    }
+  }
+  :root[data-theme="dark"] {
+    color-scheme: dark;
+    --surface-1:      #1a1a19;
+    --page:           #0d0d0d;
+    --text-primary:   #ffffff;
+    --text-secondary: #c3c2b7;
+    --text-muted:     #898781;
+    --gridline:       #2c2c2a;
+    --baseline:       #383835;
+    --border:         rgba(255,255,255,0.10);
+    --series-best:    #3987e5;
+    --series-mean:    #d95926;
+    --series-worst:   #e66767;
+    --status-good:    #0ca30c;
+    --status-critical:#d03b3b;
+  }
+
+  * { box-sizing: border-box; }
+  html, body { margin: 0; padding: 0; }
+  body {
+    background: var(--page);
+    color: var(--text-primary);
+    font-family: system-ui, -apple-system, "Segoe UI", sans-serif;
+    font-size: 14px;
+  }
+
+  header {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    padding: 14px 20px;
+    border-bottom: 1px solid var(--border);
+  }
+  header h1 { font-size: 16px; font-weight: 600; margin: 0; }
+  header .sub { color: var(--text-secondary); font-size: 12.5px; margin-top: 2px; }
+
+  .layout {
+    display: grid;
+    grid-template-columns: 300px 1fr;
+    gap: 16px;
+    padding: 16px 20px;
+    max-width: 1400px;
+    margin: 0 auto;
+  }
+  @media (max-width: 900px) {
+    .layout { grid-template-columns: 1fr; }
+  }
+
+  .panel {
+    background: var(--surface-1);
+    border: 1px solid var(--border);
+    border-radius: 10px;
+    padding: 16px;
+  }
+  .panel h2 {
+    font-size: 12.5px;
+    text-transform: uppercase;
+    letter-spacing: 0.04em;
+    color: var(--text-muted);
+    margin: 0 0 12px 0;
+    font-weight: 600;
+  }
+
+  label { display: block; font-size: 12.5px; color: var(--text-secondary); margin: 10px 0 4px; }
+  select, input {
+    width: 100%;
+    padding: 7px 8px;
+    border-radius: 6px;
+    border: 1px solid var(--border);
+    background: var(--page);
+    color: var(--text-primary);
+    font-size: 13px;
+  }
+  .row2 { display: grid; grid-template-columns: 1fr 1fr; gap: 8px; }
+
+  button {
+    margin-top: 14px;
+    width: 100%;
+    padding: 9px 10px;
+    border-radius: 7px;
+    border: none;
+    background: var(--series-best);
+    color: white;
+    font-weight: 600;
+    font-size: 13px;
+    cursor: pointer;
+  }
+  button.stop { background: var(--status-critical); }
+  button:disabled { opacity: 0.5; cursor: not-allowed; }
+
+  .charts { display: flex; flex-direction: column; gap: 16px; }
+  .charts-row { display: grid; grid-template-columns: 1fr 1fr; gap: 16px; }
+  @media (max-width: 900px) {
+    .charts-row { grid-template-columns: 1fr; }
+  }
+
+  canvas { width: 100%; display: block; }
+
+  .stats-grid {
+    display: grid;
+    grid-template-columns: repeat(4, 1fr);
+    gap: 10px;
+    margin-top: 4px;
+  }
+  @media (max-width: 700px) {
+    .stats-grid { grid-template-columns: repeat(2, 1fr); }
+  }
+  .stat {
+    background: var(--page);
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    padding: 10px 12px;
+  }
+  .stat .label { font-size: 11.5px; color: var(--text-muted); }
+  .stat .value {
+    font-size: 18px;
+    font-weight: 600;
+    margin-top: 2px;
+    font-variant-numeric: tabular-nums;
+  }
+
+  .legend { display: flex; gap: 14px; font-size: 12px; color: var(--text-secondary); margin-bottom: 6px; }
+  .legend span { display: inline-flex; align-items: center; gap: 6px; }
+  .swatch { width: 10px; height: 10px; border-radius: 2px; display: inline-block; }
+
+  #status-line { font-size: 12.5px; color: var(--text-secondary); margin-top: 10px; min-height: 16px; }
+  #status-line.error { color: var(--status-critical); }
+  #status-line.done { color: var(--status-good); }
+
+  .tooltip {
+    position: absolute;
+    pointer-events: none;
+    background: var(--surface-1);
+    border: 1px solid var(--border);
+    border-radius: 6px;
+    padding: 6px 8px;
+    font-size: 12px;
+    color: var(--text-primary);
+    box-shadow: 0 2px 8px rgba(0,0,0,0.15);
+    display: none;
+    white-space: nowrap;
+  }
+  .chart-wrap { position: relative; }
+</style>
+</head>
+<body>
+
+<header>
+  <div>
+    <h1>OptimZoo Dashboard</h1>
+    <div class="sub">Live optimization runs, streamed from the Python engine</div>
+  </div>
+  <div class="sub" id="conn-indicator">not connected</div>
+</header>
+
+<div class="layout">
+  <div class="panel" id="config-panel">
+    <h2>Run configuration</h2>
+
+    <label for="algorithm">Algorithm</label>
+    <select id="algorithm"></select>
+
+    <label for="problem">Problem</label>
+    <select id="problem"></select>
+
+    <div class="row2">
+      <div>
+        <label for="dimension">Dimension</label>
+        <input id="dimension" type="number" value="2" min="1" max="200" />
+      </div>
+      <div>
+        <label for="population">Population</label>
+        <input id="population" type="number" value="40" min="2" max="500" />
+      </div>
+    </div>
+
+    <div class="row2">
+      <div>
+        <label for="iterations">Max iterations</label>
+        <input id="iterations" type="number" value="200" min="1" max="20000" />
+      </div>
+      <div>
+        <label for="seed">Seed (optional)</label>
+        <input id="seed" type="number" placeholder="random" />
+      </div>
+    </div>
+
+    <button id="start-btn">Start run</button>
+    <button id="stop-btn" class="stop" style="display:none;">Stop run</button>
+    <div id="status-line"></div>
+  </div>
+
+  <div class="charts">
+    <div class="charts-row">
+      <div class="panel">
+        <h2>Search landscape</h2>
+        <div class="legend">
+          <span><span class="swatch" style="background:var(--series-best)"></span>population</span>
+          <span><span class="swatch" style="background:var(--status-critical)"></span>best</span>
+        </div>
+        <div class="chart-wrap">
+          <canvas id="landscape-canvas" width="560" height="480"></canvas>
+          <div class="tooltip" id="landscape-tooltip"></div>
+        </div>
+      </div>
+
+      <div class="panel">
+        <h2>Convergence</h2>
+        <div class="legend">
+          <span><span class="swatch" style="background:var(--series-best)"></span>best</span>
+          <span><span class="swatch" style="background:var(--series-mean)"></span>mean</span>
+          <span><span class="swatch" style="background:var(--series-worst)"></span>worst</span>
+        </div>
+        <div class="chart-wrap">
+          <canvas id="convergence-canvas" width="560" height="480"></canvas>
+          <div class="tooltip" id="convergence-tooltip"></div>
+        </div>
+      </div>
+    </div>
+
+    <div class="panel">
+      <h2>Live statistics</h2>
+      <div class="stats-grid">
+        <div class="stat"><div class="label">Iteration</div><div class="value" id="stat-iteration">–</div></div>
+        <div class="stat"><div class="label">Best fitness</div><div class="value" id="stat-best">–</div></div>
+        <div class="stat"><div class="label">Mean fitness</div><div class="value" id="stat-mean">–</div></div>
+        <div class="stat"><div class="label">Std dev</div><div class="value" id="stat-std">–</div></div>
+        <div class="stat"><div class="label">Evaluations</div><div class="value" id="stat-evals">–</div></div>
+        <div class="stat"><div class="label">Elapsed</div><div class="value" id="stat-elapsed">–</div></div>
+        <div class="stat"><div class="label">Iter / sec</div><div class="value" id="stat-ips">–</div></div>
+        <div class="stat"><div class="label">Status</div><div class="value" id="stat-status">idle</div></div>
+      </div>
+    </div>
+  </div>
+</div>
+
+<script src="app.js"></script>
+</body>
+</html>

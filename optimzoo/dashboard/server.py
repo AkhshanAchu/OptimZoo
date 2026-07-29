@@ -105,4 +105,18 @@ async def run_events(websocket: WebSocket, run_id: str):
         handle.stop_event.set()
 
 
-app.mount("/", StaticFiles(directory=str(STATIC_DIR), html=True), name="static")
+class _NoCacheStaticFiles(StaticFiles):
+    """Disables browser caching for the dashboard's static assets.
+
+    This is a locally-served developer tool with no build/versioning step, so
+    a stale cached app.js after an update is a real footgun (browsers can
+    reuse a cached response across reloads even without a hard refresh).
+    """
+
+    async def get_response(self, path: str, scope):
+        response = await super().get_response(path, scope)
+        response.headers["Cache-Control"] = "no-store, no-cache, must-revalidate"
+        return response
+
+
+app.mount("/", _NoCacheStaticFiles(directory=str(STATIC_DIR), html=True), name="static")

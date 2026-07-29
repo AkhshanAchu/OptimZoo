@@ -190,19 +190,20 @@ function drawLandscapeFrame(run, canvas, eventIndex) {
   if (!event) return;
 
   if (event.population && event.population.positions) {
-    ctx.fillStyle = cssVar("--series-best");
+    // Orange (not the landscape's own blue ramp) so population dots stay
+    // visible regardless of how light/dark the heatmap is at that point;
+    // a white halo plus dark outline keeps them legible in both cases.
+    ctx.fillStyle = cssVar("--series-mean");
     ctx.strokeStyle = "#ffffff";
-    ctx.lineWidth = 1;
-    ctx.globalAlpha = 0.9;
+    ctx.lineWidth = 1.5;
     event.population.positions.forEach((p) => {
       const xy = dataToCanvas(run, p[0], p[1]);
       if (!xy) return;
       ctx.beginPath();
-      ctx.arc(xy[0], xy[1], 3.2, 0, Math.PI * 2);
+      ctx.arc(xy[0], xy[1], 3.4, 0, Math.PI * 2);
       ctx.fill();
       ctx.stroke();
     });
-    ctx.globalAlpha = 1;
   }
 
   if (event.best_position) {
@@ -855,6 +856,18 @@ function renderHistoryList() {
   });
 }
 
+// Reflect a loaded/replayed run's configuration in the run-config form, so it
+// doesn't keep showing whatever was last typed in for a different run.
+function syncConfigFormToRunSummary(summary) {
+  el("algorithm").value = summary.algorithm;
+  el("problem").value = summary.problem;
+  syncDimensionField();
+  el("dimension").value = summary.dimension;
+  el("population").value = summary.population_size;
+  el("iterations").value = summary.max_iterations;
+  el("seed").value = summary.seed === null || summary.seed === undefined ? "" : summary.seed;
+}
+
 async function loadRunIntoSlot(runId, slot) {
   const full = await fetch(`/api/runs/${runId}`).then((r) => r.json());
   const runState = newRunState();
@@ -871,6 +884,7 @@ async function loadRunIntoSlot(runId, slot) {
       await loadLandscape(state.runA, runState.meta.problem, runState.meta.dimension);
       rebuildLandscape(state.runA, el("landscape-canvas"));
     }
+    syncConfigFormToRunSummary(full);
     el("landscape-run-label").textContent = `#${runId}`;
     el("convergence-run-label").textContent = `#${runId}`;
     setStatus(`Viewing past run #${runId} (read-only replay).`, "done");

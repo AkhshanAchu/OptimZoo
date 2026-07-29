@@ -136,3 +136,5 @@ CLI + a live dashboard for 2D problems), not the full GPU/distributed/plugin-
 marketplace vision of a "batteries-included" optimization platform. The
 architecture is intentionally extensible so those pieces can be layered on
 later without breaking the API.
+---
+Made with ❤️ from NiceGuy

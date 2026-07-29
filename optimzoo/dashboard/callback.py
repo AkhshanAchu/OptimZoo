@@ -1,7 +1,7 @@
 from __future__ import annotations
 
-import queue
 import time
+from typing import Callable
 
 import numpy as np
 
@@ -15,16 +15,16 @@ def _to_list(x) -> list | None:
 
 
 class DashboardCallback(BaseCallback):
-    """Pushes JSON-serializable iteration events onto a queue for a live dashboard
-    to consume over a WebSocket. One instance is created per run."""
+    """Emits JSON-serializable iteration events to a sink callable for a live
+    dashboard to stream and/or record for later replay. One instance per run."""
 
-    def __init__(self, event_queue: "queue.Queue", max_population_points: int = 500):
-        self.queue = event_queue
+    def __init__(self, sink: Callable[[dict], None], max_population_points: int = 500):
+        self.sink = sink
         self.max_population_points = max_population_points
         self._start_time = 0.0
 
     def _put(self, event: dict) -> None:
-        self.queue.put(event)
+        self.sink(event)
 
     def on_start(self, optimizer) -> None:
         self._start_time = time.perf_counter()

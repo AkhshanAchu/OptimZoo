@@ -98,11 +98,11 @@ optimzoo benchmark --algorithms PSO DifferentialEvolution --problems Sphere Rast
 
 ## Live dashboard
 
-For 2D problems, watch an optimization run live in the browser: population
-scatter over the fitness landscape, a convergence chart with hover tooltips,
-and live statistics (iteration, best/mean/worst fitness, evaluations,
-iterations/sec). Backend is FastAPI + WebSocket; the frontend is plain
-HTML/CSS/JS with no build step.
+For 2D problems, watch an optimization run live in the browser, then go back
+and inspect it: population scatter over the fitness landscape, a convergence
+chart with hover tooltips, and live statistics (iteration, best/mean/worst
+fitness, evaluations, iterations/sec). Backend is FastAPI + WebSocket; the
+frontend is plain HTML/CSS/JS with no build step.
 
 ```bash
 pip install -e ".[dashboard]"
@@ -113,6 +113,21 @@ This starts a local server (default `http://127.0.0.1:8000`) and opens it in
 your browser. Pick an algorithm and problem, set the population/iterations,
 and click "Start run" to stream the search live. Runs execute in a background
 thread; "Stop run" cancels cooperatively at the next iteration boundary.
+
+Once data exists (live or finished), the dashboard supports:
+
+- **Timeline scrubber** — drag the slider (or use the prev/next/play buttons,
+  or arrow keys / spacebar) to replay any past iteration of the current run,
+  seeing the population and best point exactly as they were then.
+- **Zoom & pan on the landscape** — scroll to zoom into the fitness heatmap
+  around the cursor, drag to pan, double-click to reset.
+- **Zoom on the convergence chart** — drag-select an iteration range to zoom
+  the fitness-vs-iteration chart into that slice; double-click to reset.
+- **Run history** — every run started this session is listed in the sidebar;
+  click one to reload it (read-only replay, scrubbable) even after the page
+  has moved on to a different run.
+- **Compare two runs** — check "Compare two runs," pick a run from history to
+  load as "run B," and see both runs' best-fitness convergence overlaid.
 
 ## Extending
 

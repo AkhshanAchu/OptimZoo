@@ -67,6 +67,19 @@ def stop_run(run_id: str):
     return {"stopped": True}
 
 
+@app.get("/api/runs")
+def list_runs():
+    return manager.list_runs()
+
+
+@app.get("/api/runs/{run_id}")
+def get_run(run_id: str):
+    handle = manager.get_run(run_id)
+    if handle is None:
+        raise HTTPException(status_code=404, detail="Unknown run_id")
+    return {**handle.summary(), "events": handle.events}
+
+
 @app.websocket("/ws/runs/{run_id}")
 async def run_events(websocket: WebSocket, run_id: str):
     await websocket.accept()

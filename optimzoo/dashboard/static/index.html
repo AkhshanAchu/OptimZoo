@@ -18,8 +18,10 @@
     --series-best:    #2a78d6;
     --series-mean:    #eb6834;
     --series-worst:   #e34948;
+    --series-run-b:   #1baf7a;
     --status-good:    #0ca30c;
     --status-critical:#d03b3b;
+    --hover-wash:     rgba(11,11,11,0.05);
   }
   @media (prefers-color-scheme: dark) {
     :root:where(:not([data-theme="light"])) {
@@ -35,8 +37,10 @@
       --series-best:    #3987e5;
       --series-mean:    #d95926;
       --series-worst:   #e66767;
+      --series-run-b:   #199e70;
       --status-good:    #0ca30c;
       --status-critical:#d03b3b;
+      --hover-wash:     rgba(255,255,255,0.06);
     }
   }
   :root[data-theme="dark"] {
@@ -52,8 +56,10 @@
     --series-best:    #3987e5;
     --series-mean:    #d95926;
     --series-worst:   #e66767;
+    --series-run-b:   #199e70;
     --status-good:    #0ca30c;
     --status-critical:#d03b3b;
+    --hover-wash:     rgba(255,255,255,0.06);
   }
 
   * { box-sizing: border-box; }
@@ -77,13 +83,17 @@
 
   .layout {
     display: grid;
-    grid-template-columns: 300px 1fr;
+    grid-template-columns: 280px 1fr 260px;
     gap: 16px;
     padding: 16px 20px;
-    max-width: 1400px;
+    max-width: 1600px;
     margin: 0 auto;
   }
-  @media (max-width: 900px) {
+  @media (max-width: 1150px) {
+    .layout { grid-template-columns: 280px 1fr; }
+    .layout .history-col { grid-column: 1 / -1; }
+  }
+  @media (max-width: 780px) {
     .layout { grid-template-columns: 1fr; }
   }
 
@@ -100,6 +110,9 @@
     color: var(--text-muted);
     margin: 0 0 12px 0;
     font-weight: 600;
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
   }
 
   label { display: block; font-size: 12.5px; color: var(--text-secondary); margin: 10px 0 4px; }
@@ -127,15 +140,36 @@
     cursor: pointer;
   }
   button.stop { background: var(--status-critical); }
+  button.ghost {
+    background: transparent;
+    color: var(--text-secondary);
+    border: 1px solid var(--border);
+    font-weight: 500;
+  }
   button:disabled { opacity: 0.5; cursor: not-allowed; }
 
-  .charts { display: flex; flex-direction: column; gap: 16px; }
+  .icon-btn {
+    width: auto;
+    margin: 0;
+    padding: 4px 9px;
+    font-size: 11.5px;
+    background: transparent;
+    color: var(--text-secondary);
+    border: 1px solid var(--border);
+    border-radius: 6px;
+  }
+  .icon-btn:hover { background: var(--hover-wash); }
+
+  .charts { display: flex; flex-direction: column; gap: 16px; min-width: 0; }
   .charts-row { display: grid; grid-template-columns: 1fr 1fr; gap: 16px; }
   @media (max-width: 900px) {
     .charts-row { grid-template-columns: 1fr; }
   }
 
-  canvas { width: 100%; display: block; }
+  canvas { width: 100%; display: block; touch-action: none; }
+  #landscape-canvas, #landscape-canvas-b { cursor: grab; }
+  #landscape-canvas.dragging, #landscape-canvas-b.dragging { cursor: grabbing; }
+  #convergence-canvas, #convergence-canvas-b { cursor: crosshair; }
 
   .stats-grid {
     display: grid;
@@ -160,7 +194,7 @@
     font-variant-numeric: tabular-nums;
   }
 
-  .legend { display: flex; gap: 14px; font-size: 12px; color: var(--text-secondary); margin-bottom: 6px; }
+  .legend { display: flex; gap: 14px; font-size: 12px; color: var(--text-secondary); margin-bottom: 6px; flex-wrap: wrap; }
   .legend span { display: inline-flex; align-items: center; gap: 6px; }
   .swatch { width: 10px; height: 10px; border-radius: 2px; display: inline-block; }
 
@@ -180,8 +214,75 @@
     box-shadow: 0 2px 8px rgba(0,0,0,0.15);
     display: none;
     white-space: nowrap;
+    z-index: 5;
   }
   .chart-wrap { position: relative; }
+  .chart-toolbar { display: flex; justify-content: flex-end; gap: 6px; margin-top: 6px; }
+
+  /* Timeline scrubber */
+  .scrubber {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    margin-top: 4px;
+  }
+  .scrubber button {
+    margin: 0;
+    width: 34px;
+    height: 30px;
+    padding: 0;
+    flex: none;
+    font-size: 14px;
+    line-height: 1;
+  }
+  .scrubber input[type="range"] {
+    flex: 1;
+    accent-color: var(--series-best);
+    padding: 0;
+  }
+  .scrubber .scrub-label {
+    font-size: 12px;
+    color: var(--text-secondary);
+    min-width: 96px;
+    text-align: right;
+    font-variant-numeric: tabular-nums;
+  }
+
+  /* Run history sidebar */
+  .run-list { display: flex; flex-direction: column; gap: 6px; max-height: 560px; overflow-y: auto; }
+  .run-item {
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    padding: 8px 10px;
+    cursor: pointer;
+    background: var(--page);
+  }
+  .run-item:hover { background: var(--hover-wash); }
+  .run-item.selected { border-color: var(--series-best); }
+  .run-item.selected-b { border-color: var(--series-run-b); }
+  .run-item .title { font-size: 12.5px; font-weight: 600; }
+  .run-item .meta { font-size: 11px; color: var(--text-muted); margin-top: 2px; }
+  .run-item .badges { display: flex; gap: 6px; margin-top: 6px; }
+  .run-badge {
+    font-size: 10.5px;
+    padding: 1px 6px;
+    border-radius: 999px;
+    background: var(--hover-wash);
+    color: var(--text-secondary);
+  }
+  .empty-hint { font-size: 12px; color: var(--text-muted); padding: 8px 0; }
+
+  .compare-toggle {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    font-size: 12.5px;
+    color: var(--text-secondary);
+  }
+  .compare-toggle input { width: auto; }
+
+  #compare-section { display: none; }
+  #compare-section.active { display: block; }
 </style>
 </head>
 <body>
@@ -189,7 +290,7 @@
 <header>
   <div>
     <h1>OptimZoo Dashboard</h1>
-    <div class="sub">Live optimization runs, streamed from the Python engine</div>
+    <div class="sub">Live optimization runs, streamed from the Python engine — scrub, zoom, and compare</div>
   </div>
   <div class="sub" id="conn-indicator">not connected</div>
 </header>
@@ -229,12 +330,19 @@
     <button id="start-btn">Start run</button>
     <button id="stop-btn" class="stop" style="display:none;">Stop run</button>
     <div id="status-line"></div>
+
+    <label style="margin-top:18px;">
+      <span class="compare-toggle"><input type="checkbox" id="compare-checkbox" /> Compare two runs</span>
+    </label>
   </div>
 
   <div class="charts">
-    <div class="charts-row">
+    <div class="charts-row" id="primary-charts">
       <div class="panel">
-        <h2>Search landscape</h2>
+        <h2>
+          <span>Search landscape</span>
+          <span id="landscape-run-label" style="text-transform:none;font-weight:500;color:var(--text-secondary);"></span>
+        </h2>
         <div class="legend">
           <span><span class="swatch" style="background:var(--series-best)"></span>population</span>
           <span><span class="swatch" style="background:var(--status-critical)"></span>best</span>
@@ -243,10 +351,16 @@
           <canvas id="landscape-canvas" width="560" height="480"></canvas>
           <div class="tooltip" id="landscape-tooltip"></div>
         </div>
+        <div class="chart-toolbar">
+          <button class="icon-btn" id="landscape-reset">Reset zoom</button>
+        </div>
       </div>
 
       <div class="panel">
-        <h2>Convergence</h2>
+        <h2>
+          <span>Convergence</span>
+          <span id="convergence-run-label" style="text-transform:none;font-weight:500;color:var(--text-secondary);"></span>
+        </h2>
         <div class="legend">
           <span><span class="swatch" style="background:var(--series-best)"></span>best</span>
           <span><span class="swatch" style="background:var(--series-mean)"></span>mean</span>
@@ -256,6 +370,32 @@
           <canvas id="convergence-canvas" width="560" height="480"></canvas>
           <div class="tooltip" id="convergence-tooltip"></div>
         </div>
+        <div class="chart-toolbar">
+          <button class="icon-btn" id="convergence-reset">Reset zoom</button>
+        </div>
+      </div>
+    </div>
+
+    <div class="panel" id="compare-section">
+      <h2>Compare: run B convergence overlay</h2>
+      <div class="legend">
+        <span><span class="swatch" style="background:var(--series-best)"></span>run A best</span>
+        <span><span class="swatch" style="background:var(--series-run-b)"></span>run B best</span>
+      </div>
+      <div class="chart-wrap">
+        <canvas id="compare-canvas" width="1120" height="360"></canvas>
+        <div class="tooltip" id="compare-tooltip"></div>
+      </div>
+    </div>
+
+    <div class="panel">
+      <h2>Timeline</h2>
+      <div class="scrubber">
+        <button class="icon-btn" id="scrub-play" title="Play/pause">&#9654;</button>
+        <button class="icon-btn" id="scrub-prev" title="Previous iteration">&#9664;&#9664;</button>
+        <input type="range" id="scrub-slider" min="0" max="0" value="0" step="1" />
+        <button class="icon-btn" id="scrub-next" title="Next iteration">&#9654;&#9654;</button>
+        <span class="scrub-label" id="scrub-label">iteration –</span>
       </div>
     </div>
 
@@ -271,6 +411,16 @@
         <div class="stat"><div class="label">Iter / sec</div><div class="value" id="stat-ips">–</div></div>
         <div class="stat"><div class="label">Status</div><div class="value" id="stat-status">idle</div></div>
       </div>
+    </div>
+  </div>
+
+  <div class="panel history-col">
+    <h2>
+      <span>Run history</span>
+      <button class="icon-btn" id="refresh-history" style="margin:0;">Refresh</button>
+    </h2>
+    <div class="run-list" id="run-list">
+      <div class="empty-hint">No runs yet this session.</div>
     </div>
   </div>
 </div>

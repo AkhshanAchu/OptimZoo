@@ -1,12 +1,31 @@
+// ---------------------------------------------------------------------------
+// State
+// ---------------------------------------------------------------------------
+
+function newRunState() {
+  return {
+    runId: null,
+    meta: null, // {algorithm, problem, dimension, bounds, ...}
+    events: [], // ordered "iteration" events only (start/finish/etc handled separately)
+    finished: false,
+    finishEvent: null,
+    landscape: null,
+    landscapeBase: { x0: 0, x1: 1, y0: 0, y1: 1, w: 0, h: 0 },
+    baseImage: null,
+    view: { scale: 1, panX: 0, panY: 0 }, // landscape zoom/pan (in canvas pixels, applied on top of base fit)
+    convergenceZoom: null, // {i0, i1} index range into events, or null = full range
+  };
+}
+
 const state = {
   ws: null,
   running: false,
-  bounds: null,
-  landscape: null,
-  history: { iteration: [], best: [], mean: [], worst: [] },
-  lastPopulation: null,
-  lastBestPos: null,
-  startTime: null,
+  scrubIndex: -1, // -1 = "live" (follow latest); else a fixed index into runA.events
+  playTimer: null,
+  compareMode: false,
+  runA: newRunState(),
+  runB: newRunState(),
+  historyCache: [],
 };
 
 const el = (id) => document.getElementById(id);
@@ -14,6 +33,10 @@ const el = (id) => document.getElementById(id);
 function cssVar(name) {
   return getComputedStyle(document.documentElement).getPropertyValue(name).trim();
 }
+
+// ---------------------------------------------------------------------------
+// Color ramp (sequential blue, from the validated palette)
+// ---------------------------------------------------------------------------
 
 const SEQUENTIAL_BLUE = ["#cde2fb", "#9ec5f4", "#6da7ec", "#3987e5", "#256abf", "#184f95", "#0d366b"];
 
@@ -34,6 +57,15 @@ function sequentialColor(t) {
   const localT = t * n - idx;
   return lerpColor(SEQUENTIAL_BLUE[idx], SEQUENTIAL_BLUE[idx + 1], localT);
 }
+
+function fmt(v, digits = 4) {
+  if (v === null || v === undefined || !Number.isFinite(v)) return "–";
+  return Math.abs(v) < 1e-3 || Math.abs(v) >= 1e5 ? v.toExponential(digits - 1) : v.toFixed(digits);
+}
+
+// ---------------------------------------------------------------------------
+// Options loading
+// ---------------------------------------------------------------------------
 
 async function loadOptions() {
   const [algos, problems] = await Promise.all([
@@ -75,36 +107,27 @@ function syncDimensionField() {
   }
 }
 
-async function loadLandscape(problem, dimension) {
-  const canvas = el("landscape-canvas");
+// ---------------------------------------------------------------------------
+// Landscape (fitness heatmap + population overlay), with zoom/pan
+// ---------------------------------------------------------------------------
+
+async function loadLandscape(run, problem, dimension) {
   const dim = dimension || 2;
   if (dim !== 2) {
-    state.landscape = null;
-    const ctx = canvas.getContext("2d");
-    ctx.clearRect(0, 0, canvas.width, canvas.height);
-    ctx.fillStyle = cssVar("--text-muted");
-    ctx.font = "13px system-ui";
-    ctx.textAlign = "center";
-    ctx.fillText(
-      `Landscape view only available for 2D problems (dimension=${dim})`,
-      canvas.width / 2,
-      canvas.height / 2
-    );
+    run.landscape = null;
     return;
   }
   const res = await fetch(`/api/landscape?problem=${encodeURIComponent(problem)}&dimension=2&resolution=120`);
-  state.landscape = await res.json();
-  drawLandscape();
+  run.landscape = await res.json();
 }
 
-function drawLandscape() {
-  const canvas = el("landscape-canvas");
+function rasterizeLandscape(run, canvas) {
   const ctx = canvas.getContext("2d");
   const w = canvas.width, h = canvas.height;
   ctx.clearRect(0, 0, w, h);
+  if (!run.landscape) return;
 
-  if (!state.landscape) return;
-  const { x, y, z } = state.landscape;
+  const { x, y, z } = run.landscape;
   const nx = x.length, ny = y.length;
 
   let zmin = Infinity, zmax = -Infinity;
@@ -137,35 +160,42 @@ function drawLandscape() {
     }
   }
   ctx.putImageData(imgData, 0, 0);
-
-  state.landscapeBoundsForDraw = { x0, x1, y0, y1, w, h };
-  drawPopulationOverlay();
+  run.baseImage = ctx.getImageData(0, 0, w, h);
+  run.landscapeBase = { x0, x1, y0, y1, w, h };
 }
 
-function toCanvasXY(px, py) {
-  const b = state.landscapeBoundsForDraw;
-  if (!b) return null;
-  const cx = ((px - b.x0) / (b.x1 - b.x0)) * b.w;
-  const cy = b.h - ((py - b.y0) / (b.y1 - b.y0)) * b.h;
-  return [cx, cy];
+// Map data-space (x,y) to canvas pixel, honoring the current zoom/pan view.
+function dataToCanvas(run, px, py) {
+  const b = run.landscapeBase;
+  if (!b.w) return null;
+  const baseX = ((px - b.x0) / (b.x1 - b.x0)) * b.w;
+  const baseY = b.h - ((py - b.y0) / (b.y1 - b.y0)) * b.h;
+  return [baseX * run.view.scale + run.view.panX, baseY * run.view.scale + run.view.panY];
 }
 
-function drawPopulationOverlay() {
-  const canvas = el("landscape-canvas");
+function drawLandscapeFrame(run, canvas, eventIndex) {
   const ctx = canvas.getContext("2d");
-  if (!state.landscapeBoundsForDraw) return;
+  const w = canvas.width, h = canvas.height;
+  ctx.clearRect(0, 0, w, h);
+  if (!run.baseImage) return;
 
-  // Redraw base raster is expensive per-frame; instead keep a cached base layer.
-  if (!state.baseImage) return;
-  ctx.putImageData(state.baseImage, 0, 0);
+  ctx.save();
+  ctx.translate(run.view.panX, run.view.panY);
+  ctx.scale(run.view.scale, run.view.scale);
+  ctx.imageSmoothingEnabled = false;
+  ctx.drawImage(canvas._baseCanvas, 0, 0);
+  ctx.restore();
 
-  if (state.lastPopulation && state.lastPopulation.positions) {
+  const event = eventIndex >= 0 && eventIndex < run.events.length ? run.events[eventIndex] : null;
+  if (!event) return;
+
+  if (event.population && event.population.positions) {
     ctx.fillStyle = cssVar("--series-best");
     ctx.strokeStyle = "#ffffff";
     ctx.lineWidth = 1;
     ctx.globalAlpha = 0.9;
-    state.lastPopulation.positions.forEach((p) => {
-      const xy = toCanvasXY(p[0], p[1]);
+    event.population.positions.forEach((p) => {
+      const xy = dataToCanvas(run, p[0], p[1]);
       if (!xy) return;
       ctx.beginPath();
       ctx.arc(xy[0], xy[1], 3.2, 0, Math.PI * 2);
@@ -175,8 +205,8 @@ function drawPopulationOverlay() {
     ctx.globalAlpha = 1;
   }
 
-  if (state.lastBestPos) {
-    const xy = toCanvasXY(state.lastBestPos[0], state.lastBestPos[1]);
+  if (event.best_position) {
+    const xy = dataToCanvas(run, event.best_position[0], event.best_position[1]);
     if (xy) {
       ctx.fillStyle = cssVar("--status-critical");
       ctx.strokeStyle = cssVar("--surface-1");
@@ -189,21 +219,167 @@ function drawPopulationOverlay() {
   }
 }
 
-function cacheBaseImage() {
-  const canvas = el("landscape-canvas");
-  const ctx = canvas.getContext("2d");
-  state.baseImage = ctx.getImageData(0, 0, canvas.width, canvas.height);
+// Keep an offscreen canvas holding the raw raster so zoom/pan can redraw cheaply.
+function ensureBaseCanvas(canvas) {
+  if (!canvas._baseCanvas) {
+    canvas._baseCanvas = document.createElement("canvas");
+    canvas._baseCanvas.width = canvas.width;
+    canvas._baseCanvas.height = canvas.height;
+  }
+  return canvas._baseCanvas;
 }
 
-function drawConvergence() {
-  const canvas = el("convergence-canvas");
+function rebuildLandscape(run, canvas) {
+  const base = ensureBaseCanvas(canvas);
+  rasterizeLandscape(run, base);
+}
+
+function setupLandscapeInteraction(canvas, getRun, onChange) {
+  let dragging = false;
+  let lastX = 0, lastY = 0;
+
+  canvas.addEventListener("wheel", (ev) => {
+    ev.preventDefault();
+    const run = getRun();
+    const rect = canvas.getBoundingClientRect();
+    const scaleX = canvas.width / rect.width;
+    const scaleY = canvas.height / rect.height;
+    const mx = (ev.clientX - rect.left) * scaleX;
+    const my = (ev.clientY - rect.top) * scaleY;
+
+    const zoomFactor = ev.deltaY < 0 ? 1.15 : 1 / 1.15;
+    const newScale = Math.min(20, Math.max(1, run.view.scale * zoomFactor));
+
+    // zoom around the cursor position
+    const dataX = (mx - run.view.panX) / run.view.scale;
+    const dataY = (my - run.view.panY) / run.view.scale;
+    run.view.scale = newScale;
+    run.view.panX = mx - dataX * newScale;
+    run.view.panY = my - dataY * newScale;
+    clampPan(run, canvas);
+    onChange();
+  }, { passive: false });
+
+  canvas.addEventListener("mousedown", (ev) => {
+    dragging = true;
+    lastX = ev.clientX;
+    lastY = ev.clientY;
+    canvas.classList.add("dragging");
+  });
+  window.addEventListener("mousemove", (ev) => {
+    if (!dragging) return;
+    const run = getRun();
+    const rect = canvas.getBoundingClientRect();
+    const scaleX = canvas.width / rect.width;
+    const scaleY = canvas.height / rect.height;
+    run.view.panX += (ev.clientX - lastX) * scaleX;
+    run.view.panY += (ev.clientY - lastY) * scaleY;
+    lastX = ev.clientX;
+    lastY = ev.clientY;
+    clampPan(run, canvas);
+    onChange();
+  });
+  window.addEventListener("mouseup", () => {
+    dragging = false;
+    canvas.classList.remove("dragging");
+  });
+  canvas.addEventListener("dblclick", () => {
+    const run = getRun();
+    run.view = { scale: 1, panX: 0, panY: 0 };
+    onChange();
+  });
+}
+
+function clampPan(run, canvas) {
+  const w = canvas.width, h = canvas.height;
+  const scaledW = w * run.view.scale;
+  const scaledH = h * run.view.scale;
+  const minPanX = Math.min(0, w - scaledW);
+  const minPanY = Math.min(0, h - scaledH);
+  run.view.panX = Math.min(0, Math.max(minPanX, run.view.panX));
+  run.view.panY = Math.min(0, Math.max(minPanY, run.view.panY));
+}
+
+function setupLandscapeTooltip(canvas, getRun, tooltipEl) {
+  canvas.addEventListener("mousemove", (ev) => {
+    const run = getRun();
+    const idx = currentEventIndex(run);
+    const event = idx >= 0 && idx < run.events.length ? run.events[idx] : null;
+    if (!event || !event.population) {
+      tooltipEl.style.display = "none";
+      return;
+    }
+    const rect = canvas.getBoundingClientRect();
+    const scaleX = canvas.width / rect.width;
+    const scaleY = canvas.height / rect.height;
+    const mx = (ev.clientX - rect.left) * scaleX;
+    const my = (ev.clientY - rect.top) * scaleY;
+
+    // find nearest population point in canvas space
+    let nearest = null, nearestDist = 14; // px threshold
+    event.population.positions.forEach((p, i) => {
+      const xy = dataToCanvas(run, p[0], p[1]);
+      if (!xy) return;
+      const d = Math.hypot(xy[0] - mx, xy[1] - my);
+      if (d < nearestDist) {
+        nearestDist = d;
+        nearest = { p, fitness: event.population.fitness ? event.population.fitness[i] : null };
+      }
+    });
+
+    if (!nearest) {
+      tooltipEl.style.display = "none";
+      return;
+    }
+    tooltipEl.style.display = "block";
+    tooltipEl.style.left = `${ev.clientX - rect.left + 12}px`;
+    tooltipEl.style.top = `${ev.clientY - rect.top + 8}px`;
+    tooltipEl.innerHTML =
+      `x: ${nearest.p[0].toFixed(3)}<br>y: ${nearest.p[1].toFixed(3)}` +
+      (nearest.fitness !== null ? `<br>fitness: ${fmt(nearest.fitness)}` : "");
+  });
+  canvas.addEventListener("mouseleave", () => (tooltipEl.style.display = "none"));
+}
+
+// ---------------------------------------------------------------------------
+// Convergence chart, with drag-to-zoom on the x (iteration) axis
+// ---------------------------------------------------------------------------
+
+function computeConvergenceSeries(run) {
+  const iteration = [], best = [], mean = [], worst = [];
+  run.events.forEach((e) => {
+    iteration.push(e.iteration);
+    best.push(e.best_fitness);
+    mean.push(e.mean_fitness ?? e.best_fitness);
+    worst.push(e.worst_fitness ?? e.best_fitness);
+  });
+  return { iteration, best, mean, worst };
+}
+
+function drawConvergence(run, canvas, upToIndex) {
   const ctx = canvas.getContext("2d");
   const w = canvas.width, h = canvas.height;
   const pad = { left: 56, right: 16, top: 16, bottom: 30 };
   ctx.clearRect(0, 0, w, h);
 
-  const { iteration, best, mean, worst } = state.history;
-  if (iteration.length < 2) return;
+  const series = computeConvergenceSeries(run);
+  const n = upToIndex >= 0 ? upToIndex + 1 : series.iteration.length;
+  if (n < 2) {
+    canvas._layout = null;
+    return;
+  }
+
+  let i0 = 0, i1 = n - 1;
+  if (run.convergenceZoom) {
+    i0 = Math.max(0, run.convergenceZoom.i0);
+    i1 = Math.min(n - 1, run.convergenceZoom.i1);
+    if (i1 - i0 < 1) i1 = Math.min(n - 1, i0 + 1);
+  }
+
+  const iteration = series.iteration.slice(i0, i1 + 1);
+  const best = series.best.slice(i0, i1 + 1);
+  const mean = series.mean.slice(i0, i1 + 1);
+  const worst = series.worst.slice(i0, i1 + 1);
 
   const allVals = best.concat(mean, worst).filter((v) => Number.isFinite(v));
   let vmin = Math.min(...allVals), vmax = Math.max(...allVals);
@@ -213,10 +389,9 @@ function drawConvergence() {
 
   const plotW = w - pad.left - pad.right;
   const plotH = h - pad.top - pad.bottom;
-  const xAt = (i) => pad.left + (i / (iteration.length - 1)) * plotW;
+  const xAt = (localI) => pad.left + (localI / Math.max(1, iteration.length - 1)) * plotW;
   const yAt = (v) => pad.top + plotH - ((v - vmin) / (vmax - vmin)) * plotH;
 
-  // gridlines
   ctx.strokeStyle = cssVar("--gridline");
   ctx.lineWidth = 1;
   const gridLines = 5;
@@ -256,47 +431,276 @@ function drawConvergence() {
   drawSeries(mean, cssVar("--series-mean"));
   drawSeries(best, cssVar("--series-best"));
 
-  state.convergenceLayout = { pad, plotW, plotH, vmin, vmax, w, h };
+  // marker for the currently scrubbed iteration, if within this zoomed range
+  if (upToIndex >= i0 && upToIndex <= i1) {
+    const localI = upToIndex - i0;
+    const x = xAt(localI);
+    ctx.strokeStyle = cssVar("--text-secondary");
+    ctx.setLineDash([3, 3]);
+    ctx.beginPath();
+    ctx.moveTo(x, pad.top);
+    ctx.lineTo(x, pad.top + plotH);
+    ctx.stroke();
+    ctx.setLineDash([]);
+  }
+
+  canvas._layout = { pad, plotW, plotH, vmin, vmax, w, h, i0, i1, iteration, best, mean, worst };
 }
 
-function setupConvergenceHover() {
-  const canvas = el("convergence-canvas");
-  const tooltip = el("convergence-tooltip");
-  canvas.addEventListener("mousemove", (ev) => {
-    const layout = state.convergenceLayout;
-    const { iteration, best, mean, worst } = state.history;
-    if (!layout || iteration.length === 0) return;
+function setupConvergenceInteraction(canvas, getRun, tooltipEl, onZoomChange) {
+  let dragStart = null;
+  let dragCurrent = null;
+
+  function indexFromClientX(clientX) {
+    const layout = canvas._layout;
+    if (!layout) return null;
     const rect = canvas.getBoundingClientRect();
     const scaleX = canvas.width / rect.width;
-    const mx = (ev.clientX - rect.left) * scaleX;
+    const mx = (clientX - rect.left) * scaleX;
     const frac = (mx - layout.pad.left) / layout.plotW;
-    const idx = Math.round(frac * (iteration.length - 1));
-    if (idx < 0 || idx >= iteration.length) {
-      tooltip.style.display = "none";
+    const localIdx = Math.round(frac * (layout.iteration.length - 1));
+    return layout.i0 + Math.max(0, Math.min(layout.iteration.length - 1, localIdx));
+  }
+
+  canvas.addEventListener("mousedown", (ev) => {
+    dragStart = ev.clientX;
+    dragCurrent = ev.clientX;
+  });
+
+  window.addEventListener("mousemove", (ev) => {
+    if (dragStart !== null) {
+      dragCurrent = ev.clientX;
+      redrawSelectionOverlay();
       return;
     }
-    tooltip.style.display = "block";
-    tooltip.style.left = `${ev.clientX - rect.left + 12}px`;
-    tooltip.style.top = `${ev.clientY - rect.top + 8}px`;
-    tooltip.innerHTML =
-      `iter ${iteration[idx]}<br>` +
-      `best: ${best[idx].toExponential(3)}<br>` +
-      `mean: ${mean[idx].toExponential(3)}<br>` +
-      `worst: ${worst[idx].toExponential(3)}`;
+
+    // Only the canvas's own hover area drives the tooltip — a window-level
+    // listener is used purely so dragging can continue past the canvas edge;
+    // without this bounds check the tooltip would show stale content whenever
+    // the pointer crosses over any other part of the page.
+    const rect = canvas.getBoundingClientRect();
+    const withinBounds =
+      ev.clientX >= rect.left && ev.clientX <= rect.right && ev.clientY >= rect.top && ev.clientY <= rect.bottom;
+    if (!withinBounds) {
+      tooltipEl.style.display = "none";
+      return;
+    }
+
+    const layout = canvas._layout;
+    if (!layout) {
+      tooltipEl.style.display = "none";
+      return;
+    }
+    const idx = indexFromClientX(ev.clientX);
+    if (idx === null) {
+      tooltipEl.style.display = "none";
+      return;
+    }
+    const run = getRun();
+    const e = run.events[idx];
+    if (!e) {
+      tooltipEl.style.display = "none";
+      return;
+    }
+    tooltipEl.style.display = "block";
+    tooltipEl.style.left = `${ev.clientX - rect.left + 12}px`;
+    tooltipEl.style.top = `${ev.clientY - rect.top + 8}px`;
+    tooltipEl.innerHTML =
+      `iter ${e.iteration}<br>` +
+      `best: ${fmt(e.best_fitness, 5)}<br>` +
+      `mean: ${fmt(e.mean_fitness, 5)}<br>` +
+      `worst: ${fmt(e.worst_fitness, 5)}`;
   });
-  canvas.addEventListener("mouseleave", () => (tooltip.style.display = "none"));
+
+  function redrawSelectionOverlay() {
+    const layout = canvas._layout;
+    if (!layout || dragStart === null) return;
+    const rect = canvas.getBoundingClientRect();
+    const scaleX = canvas.width / rect.width;
+    const x0 = (Math.min(dragStart, dragCurrent) - rect.left) * scaleX;
+    const x1 = (Math.max(dragStart, dragCurrent) - rect.left) * scaleX;
+
+    const run = getRun();
+    const upToIndex = currentEventIndex(run);
+    drawConvergence(run, canvas, upToIndex);
+    const ctx = canvas.getContext("2d");
+    ctx.fillStyle = "rgba(42, 120, 214, 0.15)";
+    ctx.fillRect(x0, layout.pad.top, x1 - x0, layout.plotH);
+  }
+
+  window.addEventListener("mouseup", () => {
+    if (dragStart === null) return;
+    const movedEnough = Math.abs(dragCurrent - dragStart) > 6;
+    if (movedEnough) {
+      const i0 = indexFromClientX(Math.min(dragStart, dragCurrent));
+      const i1 = indexFromClientX(Math.max(dragStart, dragCurrent));
+      if (i0 !== null && i1 !== null && i1 > i0) {
+        const run = getRun();
+        run.convergenceZoom = { i0, i1 };
+        onZoomChange();
+      }
+    }
+    dragStart = null;
+    dragCurrent = null;
+  });
+
+  canvas.addEventListener("mouseleave", () => {
+    if (dragStart === null) tooltipEl.style.display = "none";
+  });
+
+  canvas.addEventListener("dblclick", () => {
+    const run = getRun();
+    run.convergenceZoom = null;
+    onZoomChange();
+  });
 }
 
-function resetHistory() {
-  state.history = { iteration: [], best: [], mean: [], worst: [] };
-  state.lastPopulation = null;
-  state.lastBestPos = null;
+// ---------------------------------------------------------------------------
+// Scrubber
+// ---------------------------------------------------------------------------
+
+function currentEventIndex(run) {
+  if (state.scrubIndex >= 0) return Math.min(state.scrubIndex, run.events.length - 1);
+  return run.events.length - 1;
 }
 
-function fmt(v, digits = 4) {
-  if (v === null || v === undefined || !Number.isFinite(v)) return "–";
-  return Math.abs(v) < 1e-3 || Math.abs(v) >= 1e5 ? v.toExponential(digits - 1) : v.toFixed(digits);
+function syncScrubberRange() {
+  const run = state.runA;
+  const slider = el("scrub-slider");
+  const maxIdx = Math.max(0, run.events.length - 1);
+  slider.max = String(maxIdx);
+  if (state.scrubIndex === -1 || state.scrubIndex > maxIdx) {
+    slider.value = String(maxIdx);
+  } else {
+    slider.value = String(state.scrubIndex);
+  }
+  updateScrubLabel();
 }
+
+function updateScrubLabel() {
+  const run = state.runA;
+  const idx = currentEventIndex(run);
+  const e = run.events[idx];
+  const label = el("scrub-label");
+  if (!e) {
+    label.textContent = "iteration –";
+  } else {
+    const liveTag = state.scrubIndex === -1 && state.running ? " (live)" : "";
+    label.textContent = `iteration ${e.iteration}${liveTag}`;
+  }
+}
+
+function renderAll() {
+  const run = state.runA;
+  const idx = currentEventIndex(run);
+  drawLandscapeFrame(run, el("landscape-canvas"), idx);
+  drawConvergence(run, el("convergence-canvas"), idx);
+  updateStatsPanel(run, idx);
+  syncScrubberRange();
+
+  if (state.compareMode) {
+    drawCompareChart();
+  }
+}
+
+function updateStatsPanel(run, idx) {
+  const e = run.events[idx];
+  if (!e) return;
+  el("stat-iteration").textContent = e.iteration;
+  el("stat-best").textContent = fmt(e.best_fitness);
+  el("stat-mean").textContent = fmt(e.mean_fitness);
+  el("stat-std").textContent = fmt(e.std_fitness);
+  el("stat-evals").textContent = e.n_evaluations;
+  el("stat-elapsed").textContent = `${e.elapsed_seconds.toFixed(2)}s`;
+  el("stat-ips").textContent = fmt(e.iteration / Math.max(e.elapsed_seconds, 1e-6), 1);
+}
+
+function setupScrubberControls() {
+  const slider = el("scrub-slider");
+  slider.addEventListener("input", () => {
+    stopPlayback();
+    const maxIdx = state.runA.events.length - 1;
+    const v = parseInt(slider.value, 10);
+    state.scrubIndex = v >= maxIdx ? -1 : v;
+    renderAll();
+  });
+
+  el("scrub-prev").addEventListener("click", () => {
+    stopPlayback();
+    const idx = currentEventIndex(state.runA);
+    state.scrubIndex = Math.max(0, idx - 1);
+    renderAll();
+  });
+
+  el("scrub-next").addEventListener("click", () => {
+    stopPlayback();
+    const maxIdx = state.runA.events.length - 1;
+    const idx = currentEventIndex(state.runA);
+    const next = idx + 1;
+    state.scrubIndex = next >= maxIdx ? -1 : next;
+    renderAll();
+  });
+
+  el("scrub-play").addEventListener("click", () => {
+    if (state.playTimer) {
+      stopPlayback();
+    } else {
+      startPlayback();
+    }
+  });
+
+  window.addEventListener("keydown", (ev) => {
+    if (document.activeElement && ["INPUT", "SELECT"].includes(document.activeElement.tagName)) return;
+    if (ev.key === "ArrowLeft") {
+      stopPlayback();
+      const idx = currentEventIndex(state.runA);
+      state.scrubIndex = Math.max(0, idx - 1);
+      renderAll();
+    } else if (ev.key === "ArrowRight") {
+      stopPlayback();
+      const maxIdx = state.runA.events.length - 1;
+      const idx = currentEventIndex(state.runA);
+      const next = idx + 1;
+      state.scrubIndex = next >= maxIdx ? -1 : next;
+      renderAll();
+    } else if (ev.key === " ") {
+      ev.preventDefault();
+      if (state.playTimer) stopPlayback();
+      else startPlayback();
+    }
+  });
+}
+
+function startPlayback() {
+  const maxIdx = state.runA.events.length - 1;
+  if (maxIdx < 1) return;
+  if (currentEventIndex(state.runA) >= maxIdx) state.scrubIndex = 0;
+  el("scrub-play").innerHTML = "&#10074;&#10074;";
+  state.playTimer = setInterval(() => {
+    const max = state.runA.events.length - 1;
+    const idx = currentEventIndex(state.runA);
+    const next = idx + 1;
+    if (next >= max) {
+      state.scrubIndex = -1;
+      stopPlayback();
+    } else {
+      state.scrubIndex = next;
+    }
+    renderAll();
+  }, 90);
+}
+
+function stopPlayback() {
+  if (state.playTimer) {
+    clearInterval(state.playTimer);
+    state.playTimer = null;
+    el("scrub-play").innerHTML = "&#9654;";
+  }
+}
+
+// ---------------------------------------------------------------------------
+// Run lifecycle: start / stream / stop
+// ---------------------------------------------------------------------------
 
 function setStatus(text, cls) {
   const line = el("status-line");
@@ -313,12 +717,13 @@ async function startRun() {
   const seedRaw = el("seed").value;
   const seed = seedRaw === "" ? null : parseInt(seedRaw, 10);
 
-  resetHistory();
+  state.runA = newRunState();
+  state.scrubIndex = -1;
   el("stat-status").textContent = "starting";
   setStatus("Starting run…");
 
-  await loadLandscape(problem, dimension);
-  cacheBaseImage();
+  await loadLandscape(state.runA, problem, dimension);
+  rebuildLandscape(state.runA, el("landscape-canvas"));
 
   const res = await fetch("/api/runs", {
     method: "POST",
@@ -331,6 +736,9 @@ async function startRun() {
     return;
   }
   const { run_id } = await res.json();
+  state.runA.runId = run_id;
+  el("landscape-run-label").textContent = `#${run_id}`;
+  el("convergence-run-label").textContent = `#${run_id}`;
   connectWebSocket(run_id);
 }
 
@@ -341,49 +749,39 @@ function connectWebSocket(runId) {
   state.running = true;
   updateRunButtons();
   el("conn-indicator").textContent = "connected";
-  state.startTime = performance.now();
 
   ws.onmessage = (ev) => {
     const event = JSON.parse(ev.data);
-    handleEvent(event, runId);
+    handleEvent(event);
   };
   ws.onclose = () => {
     el("conn-indicator").textContent = "disconnected";
     state.running = false;
     updateRunButtons();
+    refreshHistory();
   };
 }
 
 function handleEvent(event) {
+  const run = state.runA;
   switch (event.type) {
     case "start":
-      state.bounds = event.bounds;
+      run.meta = event;
       el("stat-status").textContent = "running";
       setStatus(`Running ${event.algorithm} on ${event.problem} (dim=${event.dimension})…`);
       break;
-    case "iteration": {
-      const h = state.history;
-      h.iteration.push(event.iteration);
-      h.best.push(event.best_fitness);
-      h.mean.push(event.mean_fitness ?? event.best_fitness);
-      h.worst.push(event.worst_fitness ?? event.best_fitness);
-
-      state.lastPopulation = event.population;
-      state.lastBestPos = event.best_position;
-
-      el("stat-iteration").textContent = event.iteration;
-      el("stat-best").textContent = fmt(event.best_fitness);
-      el("stat-mean").textContent = fmt(event.mean_fitness);
-      el("stat-std").textContent = fmt(event.std_fitness);
-      el("stat-evals").textContent = event.n_evaluations;
-      el("stat-elapsed").textContent = `${event.elapsed_seconds.toFixed(2)}s`;
-      el("stat-ips").textContent = fmt(event.iteration / Math.max(event.elapsed_seconds, 1e-6), 1);
-
-      drawPopulationOverlay();
-      drawConvergence();
+    case "iteration":
+      run.events.push(event);
+      if (state.scrubIndex === -1) {
+        renderAll();
+      } else {
+        // still update stats/scrubber range even while looking at the past
+        syncScrubberRange();
+      }
       break;
-    }
     case "finish":
+      run.finished = true;
+      run.finishEvent = event;
       el("stat-status").textContent = "finished";
       setStatus(
         `Finished: best_fitness=${fmt(event.best_fitness)} after ${event.n_iterations} iterations (${event.elapsed_seconds.toFixed(2)}s)`,
@@ -413,18 +811,210 @@ function updateRunButtons() {
 }
 
 async function stopRun() {
-  if (!state.currentRunId && !state.ws) return;
+  if (!state.runA.runId) return;
   el("stop-btn").disabled = true;
-  const match = state.ws?.url.match(/\/ws\/runs\/(.+)$/);
-  const runId = match ? match[1] : null;
-  if (runId) {
-    await fetch(`/api/runs/${runId}/stop`, { method: "POST" });
-  }
+  await fetch(`/api/runs/${state.runA.runId}/stop`, { method: "POST" });
   el("stop-btn").disabled = false;
 }
 
+// ---------------------------------------------------------------------------
+// Run history sidebar
+// ---------------------------------------------------------------------------
+
+async function refreshHistory() {
+  const runs = await fetch("/api/runs").then((r) => r.json());
+  state.historyCache = runs;
+  renderHistoryList();
+}
+
+function renderHistoryList() {
+  const container = el("run-list");
+  container.innerHTML = "";
+  if (state.historyCache.length === 0) {
+    container.innerHTML = '<div class="empty-hint">No runs yet this session.</div>';
+    return;
+  }
+  state.historyCache.forEach((r) => {
+    const item = document.createElement("div");
+    item.className = "run-item";
+    if (state.runA.runId === r.run_id) item.classList.add("selected");
+    if (state.runB.runId === r.run_id) item.classList.add("selected-b");
+
+    const statusBadge = r.done ? "finished" : "running";
+    item.innerHTML = `
+      <div class="title">${r.algorithm}</div>
+      <div class="meta">${r.problem} · dim ${r.dimension} · pop ${r.population_size}</div>
+      <div class="badges">
+        <span class="run-badge">${statusBadge}</span>
+        <span class="run-badge">best ${fmt(r.best_fitness, 3)}</span>
+        <span class="run-badge">${r.n_iterations_completed}/${r.max_iterations} it</span>
+      </div>
+    `;
+    item.addEventListener("click", () => loadRunIntoSlot(r.run_id, state.compareMode ? "B" : "A"));
+    container.appendChild(item);
+  });
+}
+
+async function loadRunIntoSlot(runId, slot) {
+  const full = await fetch(`/api/runs/${runId}`).then((r) => r.json());
+  const runState = newRunState();
+  runState.runId = runId;
+  runState.meta = full.events.find((e) => e.type === "start") || null;
+  runState.events = full.events.filter((e) => e.type === "iteration");
+  runState.finished = full.done;
+  runState.finishEvent = full.events.find((e) => e.type === "finish") || null;
+
+  if (slot === "A") {
+    state.runA = runState;
+    state.scrubIndex = -1;
+    if (runState.meta) {
+      await loadLandscape(state.runA, runState.meta.problem, runState.meta.dimension);
+      rebuildLandscape(state.runA, el("landscape-canvas"));
+    }
+    el("landscape-run-label").textContent = `#${runId}`;
+    el("convergence-run-label").textContent = `#${runId}`;
+    setStatus(`Viewing past run #${runId} (read-only replay).`, "done");
+    el("stat-status").textContent = full.done ? "finished (replay)" : "running (replay)";
+    renderAll();
+  } else {
+    state.runB = runState;
+    if (runState.meta) {
+      await loadLandscape(state.runB, runState.meta.problem, runState.meta.dimension);
+    }
+    drawCompareChart();
+  }
+  renderHistoryList();
+}
+
+// ---------------------------------------------------------------------------
+// Compare mode
+// ---------------------------------------------------------------------------
+
+function drawCompareChart() {
+  const canvas = el("compare-canvas");
+  if (!canvas) return;
+  const ctx = canvas.getContext("2d");
+  const w = canvas.width, h = canvas.height;
+  const pad = { left: 60, right: 16, top: 16, bottom: 30 };
+  ctx.clearRect(0, 0, w, h);
+
+  const seriesA = computeConvergenceSeries(state.runA);
+  const seriesB = state.runB.runId ? computeConvergenceSeries(state.runB) : null;
+  if (seriesA.iteration.length < 2 && (!seriesB || seriesB.iteration.length < 2)) return;
+
+  const allVals = [...seriesA.best];
+  if (seriesB) allVals.push(...seriesB.best);
+  const finiteVals = allVals.filter((v) => Number.isFinite(v));
+  if (finiteVals.length === 0) return;
+  let vmin = Math.min(...finiteVals), vmax = Math.max(...finiteVals);
+  if (vmin === vmax) { vmin -= 1; vmax += 1; }
+  const pad10 = (vmax - vmin) * 0.05;
+  vmin -= pad10; vmax += pad10;
+
+  const maxLen = Math.max(seriesA.iteration.length, seriesB ? seriesB.iteration.length : 0);
+  const plotW = w - pad.left - pad.right;
+  const plotH = h - pad.top - pad.bottom;
+  const xAt = (i) => pad.left + (i / Math.max(1, maxLen - 1)) * plotW;
+  const yAt = (v) => pad.top + plotH - ((v - vmin) / (vmax - vmin)) * plotH;
+
+  ctx.strokeStyle = cssVar("--gridline");
+  ctx.fillStyle = cssVar("--text-muted");
+  ctx.font = "11px system-ui";
+  ctx.textAlign = "right";
+  ctx.textBaseline = "middle";
+  for (let i = 0; i <= 5; i++) {
+    const v = vmin + (i / 5) * (vmax - vmin);
+    const yy = yAt(v);
+    ctx.beginPath();
+    ctx.moveTo(pad.left, yy);
+    ctx.lineTo(w - pad.right, yy);
+    ctx.stroke();
+    ctx.fillText(v.toExponential(1), pad.left - 8, yy);
+  }
+
+  function drawSeries(values, color) {
+    ctx.strokeStyle = color;
+    ctx.lineWidth = 2;
+    ctx.beginPath();
+    values.forEach((v, i) => {
+      const x = xAt(i), y = yAt(v);
+      if (i === 0) ctx.moveTo(x, y);
+      else ctx.lineTo(x, y);
+    });
+    ctx.stroke();
+  }
+
+  drawSeries(seriesA.best, cssVar("--series-best"));
+  if (seriesB) drawSeries(seriesB.best, cssVar("--series-run-b"));
+
+  canvas._layout = { pad, plotW, plotH, vmin, vmax, w, h, maxLen, seriesA, seriesB };
+}
+
+function setupCompareTooltip() {
+  const canvas = el("compare-canvas");
+  const tooltip = el("compare-tooltip");
+  if (!canvas) return;
+  canvas.addEventListener("mousemove", (ev) => {
+    const layout = canvas._layout;
+    if (!layout) return;
+    const rect = canvas.getBoundingClientRect();
+    const scaleX = canvas.width / rect.width;
+    const mx = (ev.clientX - rect.left) * scaleX;
+    const frac = (mx - layout.pad.left) / layout.plotW;
+    const idx = Math.round(frac * (layout.maxLen - 1));
+    if (idx < 0 || idx >= layout.maxLen) {
+      tooltip.style.display = "none";
+      return;
+    }
+    const aVal = layout.seriesA.best[idx];
+    const bVal = layout.seriesB ? layout.seriesB.best[idx] : undefined;
+    tooltip.style.display = "block";
+    tooltip.style.left = `${ev.clientX - rect.left + 12}px`;
+    tooltip.style.top = `${ev.clientY - rect.top + 8}px`;
+    tooltip.innerHTML =
+      `iter ${idx}<br>run A: ${aVal !== undefined ? fmt(aVal, 5) : "–"}` +
+      (bVal !== undefined ? `<br>run B: ${fmt(bVal, 5)}` : "");
+  });
+  canvas.addEventListener("mouseleave", () => (tooltip.style.display = "none"));
+}
+
+function setupCompareToggle() {
+  el("compare-checkbox").addEventListener("change", (ev) => {
+    state.compareMode = ev.target.checked;
+    el("compare-section").classList.toggle("active", state.compareMode);
+    if (!state.compareMode) {
+      state.runB = newRunState();
+    }
+    renderHistoryList();
+    drawCompareChart();
+  });
+}
+
+// ---------------------------------------------------------------------------
+// Wire-up
+// ---------------------------------------------------------------------------
+
 el("start-btn").addEventListener("click", startRun);
 el("stop-btn").addEventListener("click", stopRun);
+el("refresh-history").addEventListener("click", refreshHistory);
+el("landscape-reset").addEventListener("click", () => {
+  state.runA.view = { scale: 1, panX: 0, panY: 0 };
+  renderAll();
+});
+el("convergence-reset").addEventListener("click", () => {
+  state.runA.convergenceZoom = null;
+  renderAll();
+});
 
-setupConvergenceHover();
+setupLandscapeInteraction(el("landscape-canvas"), () => state.runA, renderAll);
+setupLandscapeTooltip(el("landscape-canvas"), () => state.runA, el("landscape-tooltip"));
+setupConvergenceInteraction(el("convergence-canvas"), () => state.runA, el("convergence-tooltip"), renderAll);
+setupScrubberControls();
+setupCompareToggle();
+setupCompareTooltip();
+
 loadOptions();
+refreshHistory();
+setInterval(() => {
+  if (!state.playTimer) refreshHistory();
+}, 5000);
